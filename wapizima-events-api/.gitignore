@@ -1,6 +1,7 @@
-.env
-package.json
-template.yaml
 node_modules/
 .aws-sam/
+.env
 samconfig.toml
+
+# Ignorar el template de SAM para que no se suban credenciales locales
+template.yaml
