@@ -1,65 +1,190 @@
 const sequelize = require("../config/database");
 const Event = require("../models/Event");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { Op } = require("sequelize");
+
+// Inicializar el cliente de S3
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION,
+});
+const BUCKET_NAME = process.env.AWS_S3_BUCKET_NAME;
 
 exports.handler = async (event) => {
-  // Encabezados básicos para evitar problemas de CORS con React (Vite)
+  // Encabezados estandarizados para CORS con tu ecosistema React + Vite
   const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,OPTIONS",
+    "Access-Control-Allow-Origin": "*", // Apuntamos directo a tu origen para máxima seguridad
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type,X-Amz-Date,Authorization,X-Api-Key",
+      "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
   };
 
-  // Manejar el preflight de CORS (solicitudes OPTIONS que hace el navegador)
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers, body: "" };
-  }
-
   try {
-    // Asegurar la conexión a la base de datos
+    // Asegurar conexión activa al pool de RDS antes de procesar la lógica
     await sequelize.authenticate();
 
-    // 1. DETALLE DEL EVENTO: Si viene el parámetro {slug} en la URL
-    if (event.pathParameters && event.pathParameters.slug) {
-      const { slug } = event.pathParameters;
-
-      const eventDetail = await Event.findOne({ where: { slug } });
-
-      if (!eventDetail) {
-        return {
-          statusCode: 404,
-          headers,
-          body: JSON.stringify({ message: "Evento no encontrado" }),
-        };
-      }
-
+    const method = event.httpMethod;
+    // Manejar el preflight de CORS de forma inmediata
+    if (method === "OPTIONS") {
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify(eventDetail),
+        body: JSON.stringify({ message: "CORS preflight lookin good" }),
+      };
+    }
+    const path = event.path || event.requestContext?.resourcePath || "";
+
+    // ==========================================
+    // 1. RUTAS DE LECTURA (GET)
+    // ==========================================
+    if (method === "GET") {
+      // 1.1 DETALLE DEL EVENTO POR SLUG
+      if (event.pathParameters && event.pathParameters.slug) {
+        const { slug } = event.pathParameters;
+        const eventDetail = await Event.findOne({ where: { slug } });
+
+        if (!eventDetail) {
+          return {
+            statusCode: 404,
+            headers,
+            body: JSON.stringify({ message: "Evento no encontrado." }),
+          };
+        }
+
+        return { statusCode: 200, headers, body: JSON.stringify(eventDetail) };
+      }
+
+      // 1.2 INDEX DE EVENTOS futuros o del día en curso (Optimizado)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); // Resetear horas para incluir eventos de hoy por la tarde
+
+      const events = await Event.findAll({
+        where: {
+          fecha: {
+            [Op.gte]: today,
+          },
+        },
+        order: [["fecha", "ASC"]],
+      });
+
+      return { statusCode: 200, headers, body: JSON.stringify(events) };
+    }
+
+    // ==========================================
+    // 2. RUTAS DE ESCRITURA Y ACCIONES (POST)
+    // ==========================================
+    if (method === "POST") {
+      const body = JSON.parse(event.body || "{}");
+
+      // 2.1 GENERAR URL FIRMADA (PRESIGNED URL) PARA EL FLYER
+      // Detectamos si la petición va dirigida a la ruta de subida
+      if (
+        path.includes("/upload-url") ||
+        (event.pathParameters && event.pathParameters.proxy === "upload-url")
+      ) {
+        const { filename, filetype } = body;
+
+        if (!filename || !filetype) {
+          return {
+            statusCode: 400,
+            headers,
+            body: JSON.stringify({
+              message: "filename y filetype son requeridos.",
+            }),
+          };
+        }
+
+        // Estructura limpia de carpetas dentro del bucket de S3 con timestamp único
+        const fileKey = `flyers/${Date.now()}-${filename}`;
+
+        const command = new PutObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: fileKey,
+          ContentType: filetype,
+        });
+
+        // Generar enlace temporal con una validez óptima de 5 minutos
+        const uploadUrl = await getSignedUrl(s3Client, command, {
+          expiresIn: 300,
+        });
+        const finalAssetUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${fileKey}`;
+
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ uploadUrl, finalAssetUrl }),
+        };
+      }
+
+      // 2.2 CREACIÓN DEL EVENTO EN BASE DE DATOS
+      const {
+        titulo,
+        descripcion,
+        fecha,
+        costo,
+        lugar,
+        total_boletos,
+        flyer_url,
+        slug,
+        mapa,
+      } = body;
+
+      // Validaciones básicas de negocio
+      if (!titulo || !fecha || !flyer_url || !slug) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            message:
+              "Campos obligatorios faltantes (titulo, fecha, flyer_url, slug).",
+          }),
+        };
+      }
+
+      // Validar que el slug no esté duplicado antes de intentar insertar
+      const existingSlug = await Event.findOne({ where: { slug } });
+      if (existingSlug) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            message: "El slug ya se encuentra registrado para otro evento.",
+          }),
+        };
+      }
+
+      const newEvent = await Event.create({
+        titulo,
+        descripcion,
+        fecha: fecha, // Se mapea al campo de tu base de datos
+        lugar,
+        costo,
+        mapa,
+        total_boletos,
+        flyer: flyer_url,
+        status: "active",
+        slug,
+      });
+
+      return {
+        statusCode: 201,
+        headers,
+        body: JSON.stringify({
+          message: "Evento dado de alta exitosamente.",
+          event: newEvent,
+        }),
       };
     }
 
-    // 2. INDEX DE EVENTOS: Si no hay parámetros, listar todos los eventos activos
-    // Tip de optimización: Traer solo los eventos cuya fecha sea mayor o igual a hoy
-    const { Op } = require("sequelize");
-    const events = await Event.findAll({
-      where: {
-        fecha: {
-          [Op.gte]: new Date(), // Solo eventos futuros o de hoy
-        },
-      },
-      order: [["fecha", "ASC"]], // Ordenar por el más cercano primero
-    });
-
+    // Si entra un método no soportado en esta configuración
     return {
-      statusCode: 200,
+      statusCode: 405,
       headers,
-      body: JSON.stringify(events),
+      body: JSON.stringify({ message: "Método no permitido." }),
     };
   } catch (error) {
-    console.error("Error en Events Lambda:", error);
+    console.error("Error crítico en Events Lambda:", error);
     return {
       statusCode: 500,
       headers,

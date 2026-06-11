@@ -26,8 +26,20 @@ const Event = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    mapa: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+    lugar: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
     costo: {
       type: DataTypes.DECIMAL(10, 2),
+      allowNull: false,
+    },
+    total_boletos: {
+      type: DataTypes.INTEGER,
       allowNull: false,
     },
     flyer: {
