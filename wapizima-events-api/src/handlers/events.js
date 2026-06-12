@@ -36,43 +36,7 @@ exports.handler = async (event) => {
     const path = event.path || event.requestContext?.resourcePath || "";
 
     // ==========================================
-    // 1. RUTAS DE LECTURA (GET)
-    // ==========================================
-    if (method === "GET") {
-      // 1.1 DETALLE DEL EVENTO POR SLUG
-      if (event.pathParameters && event.pathParameters.slug) {
-        const { slug } = event.pathParameters;
-        const eventDetail = await Event.findOne({ where: { slug } });
-
-        if (!eventDetail) {
-          return {
-            statusCode: 404,
-            headers,
-            body: JSON.stringify({ message: "Evento no encontrado." }),
-          };
-        }
-
-        return { statusCode: 200, headers, body: JSON.stringify(eventDetail) };
-      }
-
-      // 1.2 INDEX DE EVENTOS futuros o del día en curso (Optimizado)
-      const today = new Date();
-      today.setHours(0, 0, 0, 0); // Resetear horas para incluir eventos de hoy por la tarde
-
-      const events = await Event.findAll({
-        where: {
-          fecha: {
-            [Op.gte]: today,
-          },
-        },
-        order: [["fecha", "ASC"]],
-      });
-
-      return { statusCode: 200, headers, body: JSON.stringify(events) };
-    }
-
-    // ==========================================
-    // 2. RUTAS DE ESCRITURA Y ACCIONES (POST)
+    // 1. RUTAS DE ESCRITURA Y ACCIONES (POST)
     // ==========================================
     if (method === "POST") {
       const body = JSON.parse(event.body || "{}");
@@ -175,6 +139,64 @@ exports.handler = async (event) => {
           event: newEvent,
         }),
       };
+    }
+
+    // =========================================================
+    // 2. RUTAS DE LECTURA (GET)
+    // =========================================================
+    if (method === "GET") {
+      const proxyParam = event.pathParameters?.proxy;
+
+      // CASO A: LISTAR TODOS LOS EVENTOS
+      // Si el proxy no existe, está vacío, o es una barra limpia, el frente quiere la lista completa
+      if (!proxyParam || proxyParam === "" || proxyParam === "/") {
+        try {
+          const allEvents = await Event.findAll({
+            order: [["fecha", "ASC"]], // Opcional: ordenados por fecha
+          });
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify(allEvents),
+          };
+        } catch (error) {
+          console.error("Error al listar eventos:", error);
+          return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: "Error al listar." }),
+          };
+        }
+      }
+
+      // CASO B: DETALLE DE UN EVENTO POR SLUG
+      // Si llegó hasta aquí y "proxyParam" tiene texto, asumimos con certeza que es el slug
+      try {
+        const eventDetail = await Event.findOne({
+          where: { slug: proxyParam },
+        });
+
+        if (!eventDetail) {
+          return {
+            statusCode: 404,
+            headers,
+            body: JSON.stringify({ message: "Evento no encontrado." }),
+          };
+        }
+
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify(eventDetail),
+        };
+      } catch (error) {
+        console.error("Error al buscar el slug:", error);
+        return {
+          statusCode: 500,
+          headers,
+          body: JSON.stringify({ error: "Error en el servidor." }),
+        };
+      }
     }
 
     // Si entra un método no soportado en esta configuración

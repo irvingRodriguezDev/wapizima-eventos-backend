@@ -23,11 +23,13 @@ exports.handler = async (event) => {
 
   try {
     await sequelize.authenticate();
+    const currentPath = event.resource || event.path || "";
+    console.log(currentPath, "el currentpath");
 
     // -------------------------------------------------------------
     // ENRUTADOR 1: DETECTAR SI ES LA RUTA DE RESERVAR
     // -------------------------------------------------------------
-    if (event.path === "/reservar") {
+    if (currentPath === "/reservar" || currentPath.endsWith("/reservar")) {
       if (!event.body) {
         return {
           statusCode: 400,
@@ -130,11 +132,14 @@ exports.handler = async (event) => {
         mode: "payment",
         customer_email: buyerEmail,
         // URLs a las que Stripe redirigirá al cliente al terminar
-        success_url: `https://tu-dominio-react.com/pago-exitoso?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `https://tu-dominio-react.com/evento/${eventData.slug}`,
+        success_url: `http://localhost:5173/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `http://localhost:5173/payment-error`,
         // ¡ESTO ES LO MÁS IMPORTANTE!: Guardamos el orderId en los metadata para el Webhook
         metadata: {
           orderId: nuevaOrden.id.toString(),
+          buyerName: buyerName,
+          buyerEmail: buyerEmail,
+          buyerPhone: buyerPhone,
         },
       });
 
@@ -154,7 +159,10 @@ exports.handler = async (event) => {
     // -------------------------------------------------------------
     // ENRUTADOR 2: DETECTAR SI ES LA RUTA DEL WEBHOOK DE PAGO
     // -------------------------------------------------------------
-    if (event.path === "/webhook/pago") {
+    if (
+      currentPath === "/webhook/pago" ||
+      currentPath.endsWith("/webhook/pago")
+    ) {
       let stripeEvent;
 
       // 1. VALIDACIÓN DE LA FIRMA DE STRIPE (Seguridad para evitar peticiones falsas)
@@ -164,9 +172,12 @@ exports.handler = async (event) => {
 
       if (webhookSecret && signature) {
         try {
+          const rawBody = event.isBase64Encoded
+            ? Buffer.from(event.body, "base64")
+            : Buffer.from(event.body, "utf8"); // <--- Esto garantiza que sea el RAW exacto
           // En AWS Lambda con API Gateway, event.body viene como string listo para validar
           stripeEvent = stripe.webhooks.constructEvent(
-            event.body,
+            rawBody, // <--- Pasamos el buffer crudo aquí
             signature,
             webhookSecret,
           );
