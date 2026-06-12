@@ -14,6 +14,7 @@ const Event = sequelize.define(
     costo: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     total_boletos: { type: DataTypes.INTEGER, allowNull: false },
     flyer: { type: DataTypes.STRING, allowNull: true },
+    is_sold_out: { type: DataTypes.BOOLEAN, defaultValue: false },
   },
   {
     tableName: "eventos",

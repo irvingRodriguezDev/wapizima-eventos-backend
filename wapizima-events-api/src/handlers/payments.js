@@ -174,10 +174,10 @@ exports.handler = async (event) => {
         try {
           const rawBody = event.isBase64Encoded
             ? Buffer.from(event.body, "base64")
-            : Buffer.from(event.body, "utf8"); // <--- Esto garantiza que sea el RAW exacto
-          // En AWS Lambda con API Gateway, event.body viene como string listo para validar
+            : Buffer.from(event.body, "utf8");
+
           stripeEvent = stripe.webhooks.constructEvent(
-            rawBody, // <--- Pasamos el buffer crudo aquí
+            rawBody,
             signature,
             webhookSecret,
           );
@@ -193,7 +193,6 @@ exports.handler = async (event) => {
           };
         }
       } else {
-        // Modo desarrollo: Si no configuras el STRIPE_WEBHOOK_SECRET localmente, parseamos el JSON directo
         try {
           stripeEvent = JSON.parse(event.body);
         } catch (err) {
@@ -209,7 +208,7 @@ exports.handler = async (event) => {
       if (stripeEvent.type === "checkout.session.completed") {
         const session = stripeEvent.data.object;
 
-        // Recuperamos el orderId que guardamos previamente en los metadata de la sesión
+        // Recuperamos el orderId de los metadata
         const orderId = session.metadata ? session.metadata.orderId : null;
 
         if (!orderId) {
@@ -226,7 +225,7 @@ exports.handler = async (event) => {
         // 3. BUSCAR LA ORDEN ASOCIADA
         const orden = await Order.findByPk(orderId);
 
-        // Idempotencia: Si la orden ya está pagada o no existe, respondemos 200 para no duplicar boletos
+        // Idempotencia: Evitar duplicación
         if (!orden || orden.status === "pagado") {
           return {
             statusCode: 200,
@@ -238,59 +237,90 @@ exports.handler = async (event) => {
           };
         }
 
-        // 4. TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS (Consistencia total)
+        // 4. TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS
         await sequelize.transaction(async (t) => {
-          // Actualizar estatus de la orden (Asegúrate de usar snake_case si así está en tu modelo Order)
+          // Actualizar estatus de la orden
           orden.status = "pagado";
           await orden.save({ transaction: t });
 
-          // Obtener los datos del evento para el cuerpo del correo
+          // Obtener los datos del evento
           const evento = await Event.findByPk(orden.eventId, {
             transaction: t,
           });
 
+          if (!evento) {
+            throw new Error(`Evento con ID ${orden.eventId} no encontrado.`);
+          }
+
           // 5. GENERAR LOS FOLIOS DE LOS BOLETOS
           const ticketsAGenerar = [];
-
-          // 💡 CORRECCIÓN 1: Cambiado a orden.cantidad_boletos para leer el campo real de la BD
           const totalBoletos =
             orden.cantidad_boletos || orden.cantidadBoletos || 0;
 
           for (let i = 0; i < totalBoletos; i++) {
-            // Creamos un código alfanumérico único y corto
             const hashUnico = crypto
               .randomBytes(4)
               .toString("hex")
               .toUpperCase();
             const codigoBoleto = `WPZ-${hashUnico}`;
 
-            // 💡 CORRECCIÓN 2: Aseguramos el match perfecto con los atributos de tu modelo Ticket
             ticketsAGenerar.push({
-              compraId: orden.id, // Mapea a compra_id
-              eventId: orden.eventId, // Mapea a event_id
+              compraId: orden.id,
+              eventId: orden.eventId,
               code: codigoBoleto,
               scanned: false,
+              scannedAt: null,
             });
           }
 
-          // Inserción masiva de boletos en la tabla boletos_tickets
+          // Inserción masiva de boletos
           const boletosCreados = await Ticket.bulkCreate(ticketsAGenerar, {
             transaction: t,
-            validate: true, // Valida los tipos antes de insertar en MySQL
+            validate: true,
           });
 
-          // 6. ENVIAR CORREO CON RESEND (Asíncrono)
-          // El servicio de Resend se ejecuta al final de la transacción exitosa
+          // 🔒 6. MONITOREO EN TIEMPO REAL DEL SOLD OUT (DENTRO DE LA TRANSACCIÓN)
+          // Contamos cuántos boletos se han emitido en total para este evento
+          const totalVendidos = await Ticket.count({
+            where: { eventId: evento.id },
+            transaction: t, // Súper importante usar la misma transacción
+          });
+
+          const capacidadMaxima = evento.total_boletos || 0;
+
+          // Si llegamos o superamos el límite, impactamos la BD de inmediato
+          if (totalVendidos >= capacidadMaxima) {
+            evento.is_sold_out = true;
+            await evento.save({ transaction: t });
+
+            console.log(
+              `🔥 [SOLD OUT AUTOMÁTICO] El evento "${evento.titulo}" se ha agotado.`,
+            );
+
+            // 🛑 Cancelamos órdenes 'pendiente' en cola para este evento, limpiando la pasarela
+            await Order.update(
+              { status: "cancelado_por_cupo" },
+              {
+                where: {
+                  eventId: evento.id,
+                  status: "pendiente",
+                },
+                transaction: t,
+              },
+            );
+          }
+
+          // 7. ENVIAR CORREO CON RESEND (Asíncrono)
           await enviarBoletosPorCorreo(
             orden.buyerEmail,
             orden.buyerName,
-            boletosCreados, // Le pasamos el array con los códigos generados
-            evento.titulo, // El título real de tu modelo Event
+            boletosCreados,
+            evento.titulo,
           );
         });
       }
 
-      // Stripe exige recibir obligatoriamente un HTTP 200 rápido para no reintentar el envío
+      // Respuesta rápida para Stripe
       return {
         statusCode: 200,
         headers,

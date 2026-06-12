@@ -3,6 +3,7 @@ const Event = require("../models/Event");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { Op } = require("sequelize");
+const Ticket = require("../models/Ticket");
 
 // Inicializar el cliente de S3
 const s3Client = new S3Client({
@@ -151,13 +152,20 @@ exports.handler = async (event) => {
       // Si el proxy no existe, está vacío, o es una barra limpia, el frente quiere la lista completa
       if (!proxyParam || proxyParam === "" || proxyParam === "/") {
         try {
-          const allEvents = await Event.findAll({
-            order: [["fecha", "ASC"]], // Opcional: ordenados por fecha
+          // 🚀 Tu consulta limpia y rápida en /src/handlers/events.js
+          const eventos = await Event.findAll({
+            where: {
+              fecha: { [Op.gte]: new Date() },
+            },
+            // 💡 QUITAMOS EL "include: [Ticket]" porque 'isSoldOut' ya se lee directo de la tabla
+            order: [["fecha", "ASC"]],
           });
+
+          // Ya no necesitas mapear ni contar boletos aquí, el JSON ya lleva "isSoldOut: true/false" desde la BD
           return {
             statusCode: 200,
             headers,
-            body: JSON.stringify(allEvents),
+            body: JSON.stringify(eventos),
           };
         } catch (error) {
           console.error("Error al listar eventos:", error);

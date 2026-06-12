@@ -113,12 +113,17 @@ exports.handler = async (event) => {
       }
 
       if (boleto.scanned) {
+        const horaMexico = new Date(boleto.scannedAt).toLocaleString("es-MX", {
+          timeZone: "America/Mexico_City",
+          dateStyle: "long",
+          timeStyle: "short",
+        });
         return {
           statusCode: 400,
           headers,
           body: JSON.stringify({
             valid: false,
-            message: `Este boleto YA FUE USADO el ${boleto.scannedAt}`,
+            message: `Este boleto YA FUE USADO el ${horaMexico}`,
             scannedAt: boleto.scannedAt,
           }),
         };
