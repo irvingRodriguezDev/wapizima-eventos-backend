@@ -66,7 +66,7 @@ exports.handler = async (event) => {
         };
       }
 
-      const CAPACIDAD_MAXIMA = 500;
+      const CAPACIDAD_MAXIMA = eventData.total_boletos;
       const quinceMinutosAtras = new Date(Date.now() - 15 * 60 * 1000);
 
       const boletosOcupados =
@@ -240,7 +240,7 @@ exports.handler = async (event) => {
 
         // 4. TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS (Consistencia total)
         await sequelize.transaction(async (t) => {
-          // Actualizar estatus de la orden
+          // Actualizar estatus de la orden (Asegúrate de usar snake_case si así está en tu modelo Order)
           orden.status = "pagado";
           await orden.save({ transaction: t });
 
@@ -249,19 +249,25 @@ exports.handler = async (event) => {
             transaction: t,
           });
 
-          // 5. GENERAR LOS FOLIOS DE LOS BOLETOS (Según la cantidad comprada)
+          // 5. GENERAR LOS FOLIOS DE LOS BOLETOS
           const ticketsAGenerar = [];
-          for (let i = 0; i < orden.cantidadBoletos; i++) {
-            // Creamos un código alfanumérico único y corto (Ej: WPZ-E9F3A1B2)
+
+          // 💡 CORRECCIÓN 1: Cambiado a orden.cantidad_boletos para leer el campo real de la BD
+          const totalBoletos =
+            orden.cantidad_boletos || orden.cantidadBoletos || 0;
+
+          for (let i = 0; i < totalBoletos; i++) {
+            // Creamos un código alfanumérico único y corto
             const hashUnico = crypto
               .randomBytes(4)
               .toString("hex")
               .toUpperCase();
             const codigoBoleto = `WPZ-${hashUnico}`;
 
+            // 💡 CORRECCIÓN 2: Aseguramos el match perfecto con los atributos de tu modelo Ticket
             ticketsAGenerar.push({
-              compraId: orden.id,
-              eventId: orden.eventId,
+              compraId: orden.id, // Mapea a compra_id
+              eventId: orden.eventId, // Mapea a event_id
               code: codigoBoleto,
               scanned: false,
             });
@@ -270,14 +276,16 @@ exports.handler = async (event) => {
           // Inserción masiva de boletos en la tabla boletos_tickets
           const boletosCreados = await Ticket.bulkCreate(ticketsAGenerar, {
             transaction: t,
+            validate: true, // Valida los tipos antes de insertar en MySQL
           });
 
           // 6. ENVIAR CORREO CON RESEND (Asíncrono)
+          // El servicio de Resend se ejecuta al final de la transacción exitosa
           await enviarBoletosPorCorreo(
             orden.buyerEmail,
             orden.buyerName,
-            boletosCreados,
-            evento.titulo,
+            boletosCreados, // Le pasamos el array con los códigos generados
+            evento.titulo, // El título real de tu modelo Event
           );
         });
       }
