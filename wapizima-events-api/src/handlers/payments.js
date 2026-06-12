@@ -132,8 +132,8 @@ exports.handler = async (event) => {
         mode: "payment",
         customer_email: buyerEmail,
         // URLs a las que Stripe redirigirá al cliente al terminar
-        success_url: `http://localhost:5173/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `http://localhost:5173/payment-error`,
+        success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.FRONTEND_URL}/payment-error`,
         // ¡ESTO ES LO MÁS IMPORTANTE!: Guardamos el orderId en los metadata para el Webhook
         metadata: {
           orderId: nuevaOrden.id.toString(),
