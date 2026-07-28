@@ -122,7 +122,6 @@ exports.handler = async (event) => {
               product_data: {
                 name: `Boleto(s) para: ${eventData.titulo}`,
                 description: `${cantidadBoletos} acceso(s) para el evento.`,
-                images: eventData.flyer ? [eventData.flyer] : [],
               },
               unit_amount: Math.round(parseFloat(eventData.costo) * 100),
             },
