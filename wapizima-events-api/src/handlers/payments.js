@@ -114,7 +114,7 @@ exports.handler = async (event) => {
       const cantidadEnCentavos = Math.round(total * 100);
 
       const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card"], // Puedes agregar 'oxxo' si la cuenta es de México y está activa
+        payment_method_types: ["card", "oxxo"], // Puedes agregar 'oxxo' si la cuenta es de México y está activa
         line_items: [
           {
             price_data: {
@@ -129,6 +129,13 @@ exports.handler = async (event) => {
           },
         ],
         mode: "payment",
+        payment_intent_data: {
+          description: `Boletos para ${evento.titulo}`,
+          metadata: {
+            orderId: nuevaOrden.id.toString(), // Súper importante para tu Webhook
+            eventId: eventData.id,
+          },
+        },
         customer_email: buyerEmail,
         // URLs a las que Stripe redirigirá al cliente al terminar
         success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -164,7 +171,7 @@ exports.handler = async (event) => {
     ) {
       let stripeEvent;
 
-      // 1. VALIDACIÓN DE LA FIRMA DE STRIPE (Seguridad para evitar peticiones falsas)
+      // 1. VALIDACIÓN DE LA FIRMA DE STRIPE
       const signature =
         event.headers["stripe-signature"] || event.headers["Stripe-Signature"];
       const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -203,46 +210,30 @@ exports.handler = async (event) => {
         }
       }
 
-      // 2. ESCUCHAR EL EVENTO DE ÉXITO DE STRIPE
-      if (stripeEvent.type === "checkout.session.completed") {
-        const session = stripeEvent.data.object;
-
-        // Recuperamos el orderId de los metadata
+      // 🛠️ FUNCIÓN HELPER PARA EMITIR BOLETOS E IMPACTAR BD
+      const procesarOrdenPagada = async (session) => {
         const orderId = session.metadata ? session.metadata.orderId : null;
 
         if (!orderId) {
           console.error(
             "❌ No se encontró el orderId en los metadata de Stripe",
           );
-          return {
-            statusCode: 400,
-            headers,
-            body: JSON.stringify({ message: "orderId ausente en metadata" }),
-          };
+          return;
         }
 
-        // 3. BUSCAR LA ORDEN ASOCIADA
         const orden = await Order.findByPk(orderId);
 
-        // Idempotencia: Evitar duplicación
+        // Idempotencia: Evitar duplicación si Stripe reintenta el evento
         if (!orden || orden.status === "pagado") {
-          return {
-            statusCode: 200,
-            headers,
-            body: JSON.stringify({
-              received: true,
-              message: "Orden ya procesada o inexistente",
-            }),
-          };
+          console.log(`ℹ️ Orden ${orderId} ya procesada o inexistente.`);
+          return;
         }
 
-        // 4. TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS
+        // TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS
         await sequelize.transaction(async (t) => {
-          // Actualizar estatus de la orden
           orden.status = "pagado";
           await orden.save({ transaction: t });
 
-          // Obtener los datos del evento
           const evento = await Event.findByPk(orden.eventId, {
             transaction: t,
           });
@@ -251,7 +242,7 @@ exports.handler = async (event) => {
             throw new Error(`Evento con ID ${orden.eventId} no encontrado.`);
           }
 
-          // 5. GENERAR LOS FOLIOS DE LOS BOLETOS
+          // Generación de folios
           const ticketsAGenerar = [];
           const totalBoletos =
             orden.cantidad_boletos || orden.cantidadBoletos || 0;
@@ -272,44 +263,40 @@ exports.handler = async (event) => {
             });
           }
 
-          // Inserción masiva de boletos
           const boletosCreados = await Ticket.bulkCreate(ticketsAGenerar, {
             transaction: t,
             validate: true,
           });
 
-          // 🔒 6. MONITOREO EN TIEMPO REAL DEL SOLD OUT (DENTRO DE LA TRANSACCIÓN)
-          // Contamos cuántos boletos se han emitido en total para este evento
+          // Monitoreo de Sold Out
           const totalVendidos = await Ticket.count({
             where: { eventId: evento.id },
-            transaction: t, // Súper importante usar la misma transacción
+            transaction: t,
           });
 
           const capacidadMaxima = evento.total_boletos || 0;
 
-          // Si llegamos o superamos el límite, impactamos la BD de inmediato
           if (totalVendidos >= capacidadMaxima) {
             evento.is_sold_out = true;
             await evento.save({ transaction: t });
 
             console.log(
-              `🔥 [SOLD OUT AUTOMÁTICO] El evento "${evento.titulo}" se ha agotado.`,
+              `🔥 [SOLD OUT AUTOMÁTICO] Evento "${evento.titulo}" agotado.`,
             );
 
-            // 🛑 Cancelamos órdenes 'pendiente' en cola para este evento, limpiando la pasarela
             await Order.update(
               { status: "cancelado_por_cupo" },
               {
                 where: {
                   eventId: evento.id,
-                  status: "pendiente",
+                  status: ["pendiente", "pendiente_oxxo"],
                 },
                 transaction: t,
               },
             );
           }
 
-          // 7. ENVIAR CORREO CON RESEND (Asíncrono)
+          // Enviar correo con Resend
           await enviarBoletosPorCorreo(
             orden.buyerEmail,
             orden.buyerName,
@@ -317,9 +304,60 @@ exports.handler = async (event) => {
             evento.titulo,
           );
         });
+      };
+
+      // 2. MANEJO DE EVENTOS DE STRIPE (TARJETAS + OXXO)
+
+      // A) CHECKOUT COMPLETADO
+      if (stripeEvent.type === "checkout.session.completed") {
+        const session = stripeEvent.data.object;
+
+        if (session.payment_status === "paid") {
+          // 💳 Pago inmediato con tarjeta de crédito/débito
+          await procesarOrdenPagada(session);
+        } else if (session.payment_status === "unpaid") {
+          // 🏪 El cliente generó su ficha de OXXO pero AÚN NO HA PAGADO en la tienda
+          const orderId = session.metadata ? session.metadata.orderId : null;
+          if (orderId) {
+            await Order.update(
+              { status: "pendiente_oxxo" },
+              { where: { id: orderId } },
+            );
+            console.log(
+              `⏳ Ficha OXXO generada para la orden ${orderId}. Esperando pago en tienda.`,
+            );
+          }
+        }
       }
 
-      // Respuesta rápida para Stripe
+      // B) PAGO ASÍNCRONO EN OXXO CONFIRMADO
+      else if (
+        stripeEvent.type === "checkout.session.async_payment_succeeded"
+      ) {
+        // 🏪 OXXO confirmó que el cliente entregó el dinero en el cajero
+        const session = stripeEvent.data.object;
+        console.log(
+          `✅ Pago en OXXO acreditado con éxito para la sesión ${session.id}`,
+        );
+        await procesarOrdenPagada(session);
+      }
+
+      // C) FICHA DE OXXO EXPIRADA
+      else if (stripeEvent.type === "checkout.session.async_payment_failed") {
+        // ❌ El cliente nunca fue a pagar a la tienda OXXO y la ficha venció
+        const session = stripeEvent.data.object;
+        const orderId = session.metadata ? session.metadata.orderId : null;
+
+        if (orderId) {
+          await Order.update(
+            { status: "expirado" },
+            { where: { id: orderId } },
+          );
+          console.log(`🔴 Ficha OXXO expirada para la orden ${orderId}`);
+        }
+      }
+
+      // Respuesta exitosa a Stripe para evitar reintentos
       return {
         statusCode: 200,
         headers,
