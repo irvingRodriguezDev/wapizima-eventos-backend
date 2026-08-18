@@ -93,6 +93,7 @@ exports.handler = async (event) => {
         flyer_url,
         slug,
         mapa,
+        visible_web,
       } = body;
 
       // Validaciones básicas de negocio
@@ -130,6 +131,7 @@ exports.handler = async (event) => {
         flyer: flyer_url,
         status: "active",
         slug,
+        visible_web,
       });
 
       return {
@@ -156,6 +158,7 @@ exports.handler = async (event) => {
           const eventos = await Event.findAll({
             where: {
               fecha: { [Op.gte]: new Date() },
+              visible_web: { [Op.eq]: true },
             },
             // 💡 QUITAMOS EL "include: [Ticket]" porque 'isSoldOut' ya se lee directo de la tabla
             order: [["fecha", "ASC"]],
