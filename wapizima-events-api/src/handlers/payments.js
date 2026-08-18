@@ -130,7 +130,7 @@ exports.handler = async (event) => {
         ],
         mode: "payment",
         payment_intent_data: {
-          description: `Boletos para ${evento.titulo}`,
+          description: `Boletos para ${eventData.titulo}`,
           metadata: {
             orderId: nuevaOrden.id.toString(), // Súper importante para tu Webhook
             eventId: eventData.id,
@@ -185,12 +185,12 @@ exports.handler = async (event) => {
           stripeEvent = stripe.webhooks.constructEvent(
             rawBody,
             signature,
-            webhookSecret,
+            webhookSecret
           );
         } catch (err) {
           console.error(
             "❌ Error de validación de firma del Webhook:",
-            err.message,
+            err.message
           );
           return {
             statusCode: 400,
@@ -216,7 +216,7 @@ exports.handler = async (event) => {
 
         if (!orderId) {
           console.error(
-            "❌ No se encontró el orderId en los metadata de Stripe",
+            "❌ No se encontró el orderId en los metadata de Stripe"
           );
           return;
         }
@@ -281,7 +281,7 @@ exports.handler = async (event) => {
             await evento.save({ transaction: t });
 
             console.log(
-              `🔥 [SOLD OUT AUTOMÁTICO] Evento "${evento.titulo}" agotado.`,
+              `🔥 [SOLD OUT AUTOMÁTICO] Evento "${evento.titulo}" agotado.`
             );
 
             await Order.update(
@@ -292,7 +292,7 @@ exports.handler = async (event) => {
                   status: ["pendiente", "pendiente_oxxo"],
                 },
                 transaction: t,
-              },
+              }
             );
           }
 
@@ -301,7 +301,7 @@ exports.handler = async (event) => {
             orden.buyerEmail,
             orden.buyerName,
             boletosCreados,
-            evento.titulo,
+            evento.titulo
           );
         });
       };
@@ -321,10 +321,10 @@ exports.handler = async (event) => {
           if (orderId) {
             await Order.update(
               { status: "pendiente_oxxo" },
-              { where: { id: orderId } },
+              { where: { id: orderId } }
             );
             console.log(
-              `⏳ Ficha OXXO generada para la orden ${orderId}. Esperando pago en tienda.`,
+              `⏳ Ficha OXXO generada para la orden ${orderId}. Esperando pago en tienda.`
             );
           }
         }
@@ -337,7 +337,7 @@ exports.handler = async (event) => {
         // 🏪 OXXO confirmó que el cliente entregó el dinero en el cajero
         const session = stripeEvent.data.object;
         console.log(
-          `✅ Pago en OXXO acreditado con éxito para la sesión ${session.id}`,
+          `✅ Pago en OXXO acreditado con éxito para la sesión ${session.id}`
         );
         await procesarOrdenPagada(session);
       }
@@ -351,7 +351,7 @@ exports.handler = async (event) => {
         if (orderId) {
           await Order.update(
             { status: "expirado" },
-            { where: { id: orderId } },
+            { where: { id: orderId } }
           );
           console.log(`🔴 Ficha OXXO expirada para la orden ${orderId}`);
         }
