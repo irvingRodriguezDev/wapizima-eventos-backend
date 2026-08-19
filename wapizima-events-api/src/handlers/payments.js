@@ -17,19 +17,210 @@ exports.handler = async (event) => {
       "Content-Type,X-Amz-Date,Authorization,X-Api-Key",
   };
 
-  if (event.httpMethod === "OPTIONS") {
+  const httpMethod =
+    event.httpMethod ||
+    (event.requestContext &&
+      event.requestContext.http &&
+      event.requestContext.http.method);
+
+  if (httpMethod === "OPTIONS") {
     return { statusCode: 200, headers, body: "" };
   }
 
   try {
     await sequelize.authenticate();
-    const currentPath = event.resource || event.path || "";
-    console.log(currentPath, "el currentpath");
+
+    // Normalizar la ruta eliminando barras al final
+    const rawPath = event.path || event.resource || "";
+    const currentPath = rawPath.replace(/\/$/, "");
 
     // -------------------------------------------------------------
-    // ENRUTADOR 1: DETECTAR SI ES LA RUTA DE RESERVAR
+    // ENRUTADOR 1: EMITIR BOLETOS GRATUITOS (PROTEGIDO POR COGNITO)
     // -------------------------------------------------------------
-    if (currentPath === "/reservar" || currentPath.endsWith("/reservar")) {
+    if (currentPath.endsWith("emitir-boletos-gratis")) {
+      if (!event.body) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ message: "Cuerpo de la solicitud faltante" }),
+        };
+      }
+
+      // 1. Extraer el identificador único de la vendedora autenticada desde Cognito
+      const claims = event.requestContext?.authorizer?.claims;
+      // Usamos el 'sub' (ID único e inmutable) o el 'email' registrado en Cognito
+      const vendedoraId =
+        claims?.sub || claims?.email || "vendedora_desconocida";
+      const vendedoraNombre = claims?.name || claims?.email || vendedoraId;
+
+      const {
+        eventId,
+        cantidadBoletos,
+        buyerEmail,
+        buyerName,
+        buyerPhone,
+        folioVenta,
+        montoCompra,
+      } = JSON.parse(event.body);
+
+      if (
+        !eventId ||
+        !cantidadBoletos ||
+        !buyerEmail ||
+        !buyerName ||
+        !buyerPhone
+      ) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            message: "Todos los campos son obligatorios",
+          }),
+        };
+      }
+
+      // 2. Contar la SUMA TOTAL de boletos emitidos previamente por esta vendedora
+      const boletosEmitidosVendedora =
+        (await Order.sum("cantidad_boletos", {
+          where: {
+            vendedora: vendedoraId, // Comparamos contra el ID inmutable de Cognito
+            status: "ticket_free",
+          },
+        })) || 0;
+
+      const LIMITE_BOLETOS_VENDEDORA = 10;
+      const boletosDisponiblesVendedora =
+        LIMITE_BOLETOS_VENDEDORA - boletosEmitidosVendedora;
+
+      // 3. Validar si la petición actual supera el límite de 10
+      if (
+        boletosEmitidosVendedora + Number(cantidadBoletos) >
+        LIMITE_BOLETOS_VENDEDORA
+      ) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            message: `Límite superado. Solo tienes ${boletosDisponiblesVendedora} boleto(s) disponible(s) de tu cuota de ${LIMITE_BOLETOS_VENDEDORA}.`,
+          }),
+        };
+      }
+
+      const eventData = await Event.findByPk(eventId);
+      if (!eventData) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({ message: "El evento no existe" }),
+        };
+      }
+
+      const CAPACIDAD_MAXIMA = eventData.total_boletos;
+      const quinceMinutosAtras = new Date(Date.now() - 15 * 60 * 1000);
+
+      const boletosOcupados =
+        (await Order.sum("cantidad_boletos", {
+          where: {
+            eventId,
+            [Op.or]: [
+              { status: "pagado" },
+              { status: "ticket_free" },
+              {
+                status: "pendiente",
+                reservedAt: { [Op.gte]: quinceMinutosAtras },
+              },
+            ],
+          },
+        })) || 0;
+
+      const disponibilidadReal = CAPACIDAD_MAXIMA - boletosOcupados;
+
+      if (cantidadBoletos > disponibilidadReal) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            message: `Sin lugares suficientes en el evento. Disponibles: ${disponibilidadReal}`,
+          }),
+        };
+      }
+
+      let resultado = await sequelize.transaction(async (t) => {
+        const nuevaOrden = await Order.create(
+          {
+            eventId,
+            cantidadBoletos,
+            buyerEmail,
+            buyerName,
+            buyerPhone,
+            vendedora: vendedoraId, // Guardamos el identificador inmutable de Cognito
+            vendedoraNombre: vendedoraNombre, // Opcional si agregas este campo a tu modelo Order
+            montoCompra,
+            folioVenta,
+            total: 0,
+            status: "completo_gratis",
+            reservedAt: new Date(),
+          },
+          { transaction: t }
+        );
+
+        const ticketsAGenerar = [];
+        for (let i = 0; i < cantidadBoletos; i++) {
+          const hashUnico = crypto.randomBytes(4).toString("hex").toUpperCase();
+          const codigoBoleto = `WPZ-${hashUnico}`;
+
+          ticketsAGenerar.push({
+            compraId: nuevaOrden.id,
+            eventId: eventId,
+            code: codigoBoleto,
+            scanned: false,
+            scannedAt: null,
+          });
+        }
+
+        const boletosCreados = await Ticket.bulkCreate(ticketsAGenerar, {
+          transaction: t,
+          validate: true,
+        });
+
+        const totalVendidos = await Ticket.count({
+          where: { eventId },
+          transaction: t,
+        });
+
+        if (totalVendidos >= CAPACIDAD_MAXIMA) {
+          eventData.is_sold_out = true;
+          await eventData.save({ transaction: t });
+        }
+
+        await enviarBoletosPorCorreo(
+          buyerEmail,
+          buyerName,
+          boletosCreados,
+          eventData.titulo
+        );
+
+        return {
+          orderId: nuevaOrden.id,
+          boletosEmitidos: boletosCreados.length,
+        };
+      });
+
+      return {
+        statusCode: 201,
+        headers,
+        body: JSON.stringify({
+          message: "Boletos gratuitos emitidos y enviados exitosamente.",
+          orderId: resultado.orderId,
+          totalBoletos: resultado.boletosEmitidos,
+        }),
+      };
+    }
+
+    // -------------------------------------------------------------
+    // ENRUTADOR 2: RESERVAR (PAGO PÚBLICO CON STRIPE)
+    // -------------------------------------------------------------
+    if (currentPath.endsWith("/reservar") || currentPath === "/reservar") {
       if (!event.body) {
         return {
           statusCode: 400,
@@ -75,6 +266,7 @@ exports.handler = async (event) => {
             eventId,
             [Op.or]: [
               { status: "pagado" },
+              { status: "ticket_free" },
               {
                 status: "pendiente",
                 reservedAt: { [Op.gte]: quinceMinutosAtras },
@@ -97,7 +289,6 @@ exports.handler = async (event) => {
 
       const total = parseFloat(eventData.costo) * cantidadBoletos;
 
-      // 1. Guardar la reserva en la base de datos (Estatus: pendiente)
       const nuevaOrden = await Order.create({
         eventId,
         cantidadBoletos,
@@ -109,16 +300,12 @@ exports.handler = async (event) => {
         reservedAt: new Date(),
       });
 
-      // 2. CREAR LA SESIÓN DE CHECKOUT DE STRIPE
-      // Multiplicamos por 100 porque Stripe procesa en centavos (ej. $100.00 MXN = 10000)
-      const cantidadEnCentavos = Math.round(total * 100);
-
       const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card", "oxxo"], // Puedes agregar 'oxxo' si la cuenta es de México y está activa
+        payment_method_types: ["card", "oxxo"],
         line_items: [
           {
             price_data: {
-              currency: "mxn", // Pesos Mexicanos
+              currency: "mxn",
               product_data: {
                 name: `Boleto(s) para: ${eventData.titulo}`,
                 description: `${cantidadBoletos} acceso(s) para el evento.`,
@@ -132,15 +319,13 @@ exports.handler = async (event) => {
         payment_intent_data: {
           description: `Boletos para ${eventData.titulo}`,
           metadata: {
-            orderId: nuevaOrden.id.toString(), // Súper importante para tu Webhook
+            orderId: nuevaOrden.id.toString(),
             eventId: eventData.id,
           },
         },
         customer_email: buyerEmail,
-        // URLs a las que Stripe redirigirá al cliente al terminar
         success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.FRONTEND_URL}/payment-error`,
-        // ¡ESTO ES LO MÁS IMPORTANTE!: Guardamos el orderId en los metadata para el Webhook
         metadata: {
           orderId: nuevaOrden.id.toString(),
           buyerName: buyerName,
@@ -149,29 +334,24 @@ exports.handler = async (event) => {
         },
       });
 
-      // 3. Regresar la URL de Stripe a React
       return {
         statusCode: 201,
         headers,
         body: JSON.stringify({
           message: "Reserva creada con éxito. Redirigiendo a pasarela.",
           orderId: nuevaOrden.id,
-          stripeUrl: session.url, // URL de redirección
+          stripeUrl: session.url,
           expiresAt: new Date(nuevaOrden.reservedAt.getTime() + 15 * 60 * 1000),
         }),
       };
     }
 
     // -------------------------------------------------------------
-    // ENRUTADOR 2: DETECTAR SI ES LA RUTA DEL WEBHOOK DE PAGO
+    // ENRUTADOR 3: WEBHOOK DE PAGO STRIPE (PÚBLICO)
     // -------------------------------------------------------------
-    if (
-      currentPath === "/webhook/pago" ||
-      currentPath.endsWith("/webhook/pago")
-    ) {
+    if (currentPath.endsWith("webhook/pago")) {
       let stripeEvent;
 
-      // 1. VALIDACIÓN DE LA FIRMA DE STRIPE
       const signature =
         event.headers["stripe-signature"] || event.headers["Stripe-Signature"];
       const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -210,7 +390,6 @@ exports.handler = async (event) => {
         }
       }
 
-      // 🛠️ FUNCIÓN HELPER PARA EMITIR BOLETOS E IMPACTAR BD
       const procesarOrdenPagada = async (session) => {
         const orderId = session.metadata ? session.metadata.orderId : null;
 
@@ -223,13 +402,11 @@ exports.handler = async (event) => {
 
         const orden = await Order.findByPk(orderId);
 
-        // Idempotencia: Evitar duplicación si Stripe reintenta el evento
         if (!orden || orden.status === "pagado") {
           console.log(`ℹ️ Orden ${orderId} ya procesada o inexistente.`);
           return;
         }
 
-        // TRANSACCIÓN ATÓMICA EN LA BASE DE DATOS
         await sequelize.transaction(async (t) => {
           orden.status = "pagado";
           await orden.save({ transaction: t });
@@ -242,7 +419,6 @@ exports.handler = async (event) => {
             throw new Error(`Evento con ID ${orden.eventId} no encontrado.`);
           }
 
-          // Generación de folios
           const ticketsAGenerar = [];
           const totalBoletos =
             orden.cantidad_boletos || orden.cantidadBoletos || 0;
@@ -268,7 +444,6 @@ exports.handler = async (event) => {
             validate: true,
           });
 
-          // Monitoreo de Sold Out
           const totalVendidos = await Ticket.count({
             where: { eventId: evento.id },
             transaction: t,
@@ -279,10 +454,6 @@ exports.handler = async (event) => {
           if (totalVendidos >= capacidadMaxima) {
             evento.is_sold_out = true;
             await evento.save({ transaction: t });
-
-            console.log(
-              `🔥 [SOLD OUT AUTOMÁTICO] Evento "${evento.titulo}" agotado.`
-            );
 
             await Order.update(
               { status: "cancelado_por_cupo" },
@@ -296,7 +467,6 @@ exports.handler = async (event) => {
             );
           }
 
-          // Enviar correo con Resend
           await enviarBoletosPorCorreo(
             orden.buyerEmail,
             orden.buyerName,
@@ -306,45 +476,26 @@ exports.handler = async (event) => {
         });
       };
 
-      // 2. MANEJO DE EVENTOS DE STRIPE (TARJETAS + OXXO)
-
-      // A) CHECKOUT COMPLETADO
       if (stripeEvent.type === "checkout.session.completed") {
         const session = stripeEvent.data.object;
 
         if (session.payment_status === "paid") {
-          // 💳 Pago inmediato con tarjeta de crédito/débito
           await procesarOrdenPagada(session);
         } else if (session.payment_status === "unpaid") {
-          // 🏪 El cliente generó su ficha de OXXO pero AÚN NO HA PAGADO en la tienda
           const orderId = session.metadata ? session.metadata.orderId : null;
           if (orderId) {
             await Order.update(
               { status: "pendiente_oxxo" },
               { where: { id: orderId } }
             );
-            console.log(
-              `⏳ Ficha OXXO generada para la orden ${orderId}. Esperando pago en tienda.`
-            );
           }
         }
-      }
-
-      // B) PAGO ASÍNCRONO EN OXXO CONFIRMADO
-      else if (
+      } else if (
         stripeEvent.type === "checkout.session.async_payment_succeeded"
       ) {
-        // 🏪 OXXO confirmó que el cliente entregó el dinero en el cajero
         const session = stripeEvent.data.object;
-        console.log(
-          `✅ Pago en OXXO acreditado con éxito para la sesión ${session.id}`
-        );
         await procesarOrdenPagada(session);
-      }
-
-      // C) FICHA DE OXXO EXPIRADA
-      else if (stripeEvent.type === "checkout.session.async_payment_failed") {
-        // ❌ El cliente nunca fue a pagar a la tienda OXXO y la ficha venció
+      } else if (stripeEvent.type === "checkout.session.async_payment_failed") {
         const session = stripeEvent.data.object;
         const orderId = session.metadata ? session.metadata.orderId : null;
 
@@ -353,11 +504,9 @@ exports.handler = async (event) => {
             { status: "expirado" },
             { where: { id: orderId } }
           );
-          console.log(`🔴 Ficha OXXO expirada para la orden ${orderId}`);
         }
       }
 
-      // Respuesta exitosa a Stripe para evitar reintentos
       return {
         statusCode: 200,
         headers,
@@ -365,12 +514,11 @@ exports.handler = async (event) => {
       };
     }
 
-    // Si por alguna razón cae aquí y no es ninguna ruta conocida
     return {
       statusCode: 404,
       headers,
       body: JSON.stringify({
-        message: "Ruta no encontrada dentro del handler de pagos",
+        message: `Ruta no encontrada dentro del handler de pagos: ${currentPath}`,
       }),
     };
   } catch (error) {

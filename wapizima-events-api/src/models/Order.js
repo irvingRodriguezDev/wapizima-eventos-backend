@@ -28,7 +28,13 @@ const Order = sequelize.define(
     },
     total: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     status: {
-      type: DataTypes.ENUM("pendiente", "pagado", "expirado"),
+      type: DataTypes.ENUM(
+        "pendiente",
+        "pagado",
+        "expirado",
+        "pendiente_oxxo",
+        "completo_gratis"
+      ),
       defaultValue: "pendiente",
     },
     reservedAt: {
@@ -36,11 +42,27 @@ const Order = sequelize.define(
       field: "reserved_at",
       allowNull: false,
     },
+    folioVenta: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    montoCompra: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    vendedora: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    vendedoraNombre: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
   },
   {
     tableName: "compras_ordenes",
     underscored: true,
-  },
+  }
 );
 
 module.exports = Order;
