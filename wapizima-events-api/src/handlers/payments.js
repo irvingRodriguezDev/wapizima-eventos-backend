@@ -7,6 +7,9 @@ const Event = require("../models/Event");
 const Order = require("../models/Order");
 const Ticket = require("../models/Ticket");
 const { enviarBoletosPorCorreo } = require("../utils/email");
+const {
+  enviarFichaOxxoPorCorreo,
+} = require("../utils/enviarFichaOxxoPorCorreo");
 
 exports.handler = async (event) => {
   const headers = {
@@ -478,7 +481,48 @@ exports.handler = async (event) => {
 
       if (stripeEvent.type === "checkout.session.completed") {
         const session = stripeEvent.data.object;
+        if (session.payment_status === "unpaid") {
+          // 🏪 El cliente acaba de generar su voucher de OXXO
+          const orderId = session.metadata ? session.metadata.orderId : null;
 
+          // Obtenemos los detalles del PaymentIntent para sacar la ficha de OXXO
+          const paymentIntent = await stripe.paymentIntents.retrieve(
+            session.payment_intent,
+          );
+
+          // Stripe nos entrega la URL directa del Voucher oficial en Hosted Instructions
+          const oxxoVoucherUrl =
+            paymentIntent.next_action?.oxxo_display_details?.hosted_voucher_url;
+          const oxxoReference =
+            paymentIntent.next_action?.oxxo_display_details?.number;
+          const expiresAt =
+            paymentIntent.next_action?.oxxo_display_details?.expires_after;
+
+          if (orderId) {
+            const orden = await Order.findByPk(orderId);
+            const evento = await Event.findByPk(orden.eventId);
+
+            // Actualizamos estado en la BD
+            await Order.update(
+              { status: "pendiente_oxxo" },
+              { where: { id: orderId } },
+            );
+
+            // 📧 ENVIAR CORREO CON LA FICHA DE PAGO VÍA RESEND
+            await enviarFichaOxxoPorCorreo(
+              orden.buyerEmail,
+              orden.buyerName,
+              evento.titulo,
+              orden.total,
+              oxxoVoucherUrl,
+              oxxoReference,
+            );
+
+            console.log(
+              `✉️ Ficha OXXO enviada exitosamente a ${orden.buyerEmail}`,
+            );
+          }
+        }
         if (session.payment_status === "paid") {
           await procesarOrdenPagada(session);
         } else if (session.payment_status === "unpaid") {
