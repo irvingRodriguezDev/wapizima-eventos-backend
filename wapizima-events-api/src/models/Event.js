@@ -15,12 +15,13 @@ const Event = sequelize.define(
     total_boletos: { type: DataTypes.INTEGER, allowNull: false },
     flyer: { type: DataTypes.STRING, allowNull: true },
     is_sold_out: { type: DataTypes.BOOLEAN, defaultValue: false },
+    visible_web: { type: DataTypes.BOOLEAN, defaultValue: true },
   },
   {
     tableName: "eventos",
     timestamps: true,
     underscored: true,
-  },
+  }
 );
 
 module.exports = Event;

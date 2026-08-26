@@ -93,6 +93,7 @@ exports.handler = async (event) => {
         flyer_url,
         slug,
         mapa,
+        visible_web,
       } = body;
 
       // Validaciones básicas de negocio
@@ -130,6 +131,7 @@ exports.handler = async (event) => {
         flyer: flyer_url,
         status: "active",
         slug,
+        visible_web,
       });
 
       return {
@@ -156,6 +158,35 @@ exports.handler = async (event) => {
           const eventos = await Event.findAll({
             where: {
               fecha: { [Op.gte]: new Date() },
+              visible_web: { [Op.eq]: true },
+            },
+            // 💡 QUITAMOS EL "include: [Ticket]" porque 'isSoldOut' ya se lee directo de la tabla
+            order: [["fecha", "ASC"]],
+          });
+
+          // Ya no necesitas mapear ni contar boletos aquí, el JSON ya lleva "isSoldOut: true/false" desde la BD
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify(eventos),
+          };
+        } catch (error) {
+          console.error("Error al listar eventos:", error);
+          return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: "Error al listar." }),
+          };
+        }
+      }
+
+      if (!proxyParam || proxyParam === "" || proxyParam === "available-free") {
+        try {
+          // 🚀 Tu consulta limpia y rápida en /src/handlers/events.js
+          const eventos = await Event.findAll({
+            where: {
+              fecha: { [Op.gte]: new Date() },
+              visible_web: { [Op.eq]: false },
             },
             // 💡 QUITAMOS EL "include: [Ticket]" porque 'isSoldOut' ya se lee directo de la tabla
             order: [["fecha", "ASC"]],
