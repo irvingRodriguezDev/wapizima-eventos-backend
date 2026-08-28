@@ -61,6 +61,7 @@ exports.handler = async (event) => {
         buyerPhone,
         folioVenta,
         montoCompra,
+        saleType,
       } = JSON.parse(event.body);
 
       if (
@@ -84,7 +85,7 @@ exports.handler = async (event) => {
         (await Order.sum("cantidad_boletos", {
           where: {
             vendedora: vendedoraId, // Comparamos contra el ID inmutable de Cognito
-            status: "ticket_free",
+            status: "completo_gratis", // Solo contamos los boletos emitidos exitosamente
           },
         })) || 0;
 
@@ -124,7 +125,7 @@ exports.handler = async (event) => {
             eventId,
             [Op.or]: [
               { status: "pagado" },
-              { status: "ticket_free" },
+              { status: "completo_gratis" },
               {
                 status: "pendiente",
                 reservedAt: { [Op.gte]: quinceMinutosAtras },
@@ -157,11 +158,14 @@ exports.handler = async (event) => {
             vendedoraNombre: vendedoraNombre, // Opcional si agregas este campo a tu modelo Order
             montoCompra,
             folioVenta,
-            total: 0,
-            status: "completo_gratis",
+            total:
+              saleType === "completo_gratis"
+                ? 0
+                : eventData.costo * cantidadBoletos,
+            status: saleType,
             reservedAt: new Date(),
           },
-          { transaction: t }
+          { transaction: t },
         );
 
         const ticketsAGenerar = [];
@@ -197,7 +201,7 @@ exports.handler = async (event) => {
           buyerEmail,
           buyerName,
           boletosCreados,
-          eventData.titulo
+          eventData.titulo,
         );
 
         return {
@@ -266,7 +270,8 @@ exports.handler = async (event) => {
             eventId,
             [Op.or]: [
               { status: "pagado" },
-              { status: "ticket_free" },
+              { status: "completo_gratis" },
+              { status: "pago_completo_vendedora" },
               {
                 status: "pendiente",
                 reservedAt: { [Op.gte]: quinceMinutosAtras },
@@ -365,12 +370,12 @@ exports.handler = async (event) => {
           stripeEvent = stripe.webhooks.constructEvent(
             rawBody,
             signature,
-            webhookSecret
+            webhookSecret,
           );
         } catch (err) {
           console.error(
             "❌ Error de validación de firma del Webhook:",
-            err.message
+            err.message,
           );
           return {
             statusCode: 400,
@@ -395,7 +400,7 @@ exports.handler = async (event) => {
 
         if (!orderId) {
           console.error(
-            "❌ No se encontró el orderId en los metadata de Stripe"
+            "❌ No se encontró el orderId en los metadata de Stripe",
           );
           return;
         }
@@ -463,7 +468,7 @@ exports.handler = async (event) => {
                   status: ["pendiente", "pendiente_oxxo"],
                 },
                 transaction: t,
-              }
+              },
             );
           }
 
@@ -471,7 +476,7 @@ exports.handler = async (event) => {
             orden.buyerEmail,
             orden.buyerName,
             boletosCreados,
-            evento.titulo
+            evento.titulo,
           );
         });
       };
@@ -486,7 +491,7 @@ exports.handler = async (event) => {
           if (orderId) {
             await Order.update(
               { status: "pendiente_oxxo" },
-              { where: { id: orderId } }
+              { where: { id: orderId } },
             );
           }
         }
@@ -502,7 +507,7 @@ exports.handler = async (event) => {
         if (orderId) {
           await Order.update(
             { status: "expirado" },
-            { where: { id: orderId } }
+            { where: { id: orderId } },
           );
         }
       }

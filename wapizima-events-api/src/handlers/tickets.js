@@ -59,7 +59,7 @@ exports.handler = async (event) => {
             as: "orden",
             where: {
               buyerEmail: email,
-              status: ["pagado", "completo_gratis"], // 🔒 Solo de órdenes confirmadas y pagadas
+              status: ["pagado", "completo_gratis", "pago_completo_vendedora"], // 🔒 Solo de órdenes confirmadas y pagadas
             },
             attributes: ["id", "buyerName", "buyerEmail"], // Evitamos traer datos basura
           },

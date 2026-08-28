@@ -33,7 +33,8 @@ const Order = sequelize.define(
         "pagado",
         "expirado",
         "pendiente_oxxo",
-        "completo_gratis"
+        "completo_gratis",
+        "pago_completo_vendedora",
       ),
       defaultValue: "pendiente",
     },
@@ -62,7 +63,7 @@ const Order = sequelize.define(
   {
     tableName: "compras_ordenes",
     underscored: true,
-  }
+  },
 );
 
 module.exports = Order;

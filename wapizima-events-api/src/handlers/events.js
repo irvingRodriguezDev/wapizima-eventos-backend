@@ -186,7 +186,6 @@ exports.handler = async (event) => {
           const eventos = await Event.findAll({
             where: {
               fecha: { [Op.gte]: new Date() },
-              visible_web: { [Op.eq]: false },
             },
             // 💡 QUITAMOS EL "include: [Ticket]" porque 'isSoldOut' ya se lee directo de la tabla
             order: [["fecha", "ASC"]],
