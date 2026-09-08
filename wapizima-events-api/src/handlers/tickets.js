@@ -13,6 +13,7 @@ if (!Ticket.associations.orden) {
   Order.hasMany(Ticket, { foreignKey: "compraId", as: "tickets" });
 }
 exports.handler = async (event) => {
+  context.callbackWaitsForEmptyEventLoop = false;
   // Configuración de Headers globales (Incluyendo soporte completo de métodos)
   const headers = {
     "Content-Type": "application/json",

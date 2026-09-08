@@ -9,6 +9,7 @@ const Ticket = require("../models/Ticket");
 const { enviarBoletosPorCorreo } = require("../utils/email");
 
 exports.handler = async (event) => {
+  context.callbackWaitsForEmptyEventLoop = false;
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",

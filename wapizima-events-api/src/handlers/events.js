@@ -12,6 +12,7 @@ const s3Client = new S3Client({
 const BUCKET_NAME = process.env.AWS_S3_BUCKET_NAME;
 
 exports.handler = async (event) => {
+  context.callbackWaitsForEmptyEventLoop = false;
   // Encabezados estandarizados para CORS con tu ecosistema React + Vite
   const headers = {
     "Content-Type": "application/json",
