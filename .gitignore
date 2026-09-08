@@ -6,3 +6,4 @@ package-lock.json
 
 # Ignorar el template de SAM para que no se suban credenciales locales
 template.yml
+serverless.yml
